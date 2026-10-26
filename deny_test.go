@@ -129,7 +129,7 @@ func TestAPreDenyDatabaseIsMigratedWithEveryRowKept(t *testing.T) {
 			condition TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (bundle_id, kind, member_id), CHECK (kind IN ('skill','tool')), CHECK (member_id > 0));
 		INSERT INTO bundles (id, name, match_tags, created_at, updated_at) VALUES (1, 'react', '["react"]', 1, 1);
-		INSERT INTO bundle_members (bundle_id, kind, member_id, name) VALUES (1, 'skill', 1446, 'browser-automation');
+		INSERT INTO bundle_members (bundle_id, kind, member_id, name) VALUES (1, 'skill', 9002, 'browser-automation');
 		INSERT INTO bundle_members (bundle_id, kind, member_id, name, condition) VALUES (1, 'tool', 14, 'chrome-devtools', 'perf');
 	`
 	if _, err := db.Exec(preDeny); err != nil {

@@ -43,7 +43,7 @@ func hasBundle(refs []BundleRef, name string) bool {
 // Member ids below are the ones a live skill-store and tool-store
 // assigned, so a reader can check the fixture against the live registries.
 const (
-	skillBrowserAutomation int64 = 297
+	skillBrowserAutomation int64 = 9001
 	skillBackendPatterns   int64 = 320
 	toolPlaywright         int64 = 13
 	toolChromeDevTools     int64 = 14
@@ -118,7 +118,7 @@ func TestResolveReturnsOwningStoreIDs(t *testing.T) {
 	}
 }
 
-// Deduplication is on the id. Two bundles contributing skill 297 give one
+// Deduplication is on the id. Two bundles contributing skill 9001 give one
 // entry; two different skills that share a name give two.
 func TestResolveDedupesOnIDNotName(t *testing.T) {
 	s := openTest(t)

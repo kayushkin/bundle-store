@@ -63,7 +63,7 @@ func TestUpsertBundleRoundtrip(t *testing.T) {
 		Extends:   "base",
 		MatchTags: []string{"react"},
 		Members: []Member{
-			{Kind: MemberSkill, ID: 297, Name: "browser-automation"},
+			{Kind: MemberSkill, ID: 9001, Name: "browser-automation"},
 			{Kind: MemberTool, ID: 13, Name: "playwright"},
 			{Kind: MemberTool, ID: 14, Name: "chrome-devtools", Condition: "perf"},
 		},
@@ -274,7 +274,7 @@ func TestLegacyNameKeyedMembersAreQuarantinedNotDropped(t *testing.T) {
 
 	// The migrated table takes id-carrying members, and keeps its index.
 	mustUpsert(t, s, &Bundle{Name: "react", Enabled: true, Members: []Member{
-		{Kind: MemberSkill, ID: 297, Name: "browser-automation"},
+		{Kind: MemberSkill, ID: 9001, Name: "browser-automation"},
 	}})
 	var indexed int
 	if err := s.db.QueryRow(
