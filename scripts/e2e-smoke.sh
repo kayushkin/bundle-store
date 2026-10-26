@@ -14,24 +14,22 @@
 # resolver directly — including the conditional gate, which is the part most
 # likely to rot silently.
 #
-# bundle-store SEEDS ITSELF AT BOOT (cmd/bundle-store/main.go upserts base, react
-# and go-service on every start), so a fresh temp DB is already meaningful. This
-# smoke asserts against those real shipped seeds — read them from main.go, NOT
-# from resolve_test.go, whose fixtures deliberately differ.
+# A fresh database holds NO bundles: the service seeds nothing at boot. This
+# smoke asserts the store starts empty, then creates through the API the base,
+# react and go-service bundles its later steps resolve against. They are made
+# up here, NOT copied from resolve_test.go, whose fixtures deliberately differ.
 #
-# Never touches live state: the live service runs on :8307 against
-# ~/.config/bundle-store/bundle-store.db. BUNDLE_STORE_DATA_DIR is what keeps this
-# hermetic — Open("") falls back to that live path and migrates it. HOME is
-# redirected too, belt and braces.
+# Never touches live state: BUNDLE_STORE_DATA_DIR points at a throwaway
+# directory, and Open("") would otherwise use the live default path and migrate
+# it. HOME is redirected too, belt and braces.
 #
-# resolve.go itself is a pure join over curated definitions and never reaches
-# into skill-store or tool-store — it hands back the member ids the curator
-# recorded. The BOOT SEED does reach out, once: its members are written by name
-# in main.go and it asks each owning store for the id, refusing to start if a
-# name is missing or ambiguous. This smoke stubs both stores on throwaway ports
-# so it stays hermetic and so it can assert the ids actually travel end to end,
-# and it boots a second time against a deliberately ambiguous stub to prove the
-# refusal is real.
+# The server is a pure join over curated definitions and never reaches into
+# skill-store or tool-store, so it boots with neither running — the smoke proves
+# that. Only the -check-members pre-flight asks them, by id, whether every stored
+# member still exists. The smoke stubs both stores on a throwaway port and runs
+# that check against the bundles it created: once with every id present, once
+# with a member renamed upstream (reported, not a failure), once with a member
+# deleted upstream (a failure naming it), and once with the stores down.
 #
 # Exits 0 on success, non-zero on the first failing assertion; dumps the server
 # log to stderr on failure.
@@ -49,19 +47,16 @@ STUB_PORT="${E2E_STUB_PORT:-$((PORT + 1))}"
 BASE="http://127.0.0.1:$PORT"
 STUB_BASE="http://127.0.0.1:$STUB_PORT"
 
-# The ids the stub registries hand out. The resolve assertions below check for
-# these exact numbers, so a member that silently fell back to its name shows up
-# as a missing id rather than as a still-green name assertion.
-#
-# browser-automation is the one member main.go pins by id rather than by name:
-# 1446 is the locally installed copy (source "host"), and the stub carries the antigravity row 297 beside
-# it, as skill-store does. So this number also proves the pin chose the row.
-SKILL_ID_BROWSER_AUTOMATION=1446
-SKILL_ID_SENIOR_FRONTEND=1129
-SKILL_ID_BACKEND_PATTERNS=320
-SKILL_ID_SQL_PRO=1219
-TOOL_ID_PLAYWRIGHT=13
-TOOL_ID_CHROME_DEVTOOLS=14
+# Made-up member ids. The smoke writes them into its bundles and the resolve
+# assertions check for these exact numbers, so a member that lost its id shows up
+# as a missing id rather than as a still-green name assertion. The stub
+# registries hand out the same ids for the -check-members steps.
+SKILL_ID_BROWSER_AUTOMATION=7001
+SKILL_ID_SENIOR_FRONTEND=7002
+SKILL_ID_BACKEND_PATTERNS=7003
+SKILL_ID_SQL_PRO=7004
+TOOL_ID_PLAYWRIGHT=8001
+TOOL_ID_CHROME_DEVTOOLS=8002
 
 # bundle-store uses mattn/go-sqlite3, which is cgo — a C compiler is mandatory or
 # `go build` fails with a confusing linker error under the nightly job's minimal env.
@@ -167,90 +162,6 @@ CGO_ENABLED=1 go build -o "$BIN_DIR/bundle-store" ./cmd/bundle-store
 echo "    binary: $(ls -lh "$BIN_DIR/bundle-store" | awk '{print $5}')"
 
 # ============================================================================
-# Stub skill-store and tool-store. bundle-store asks them, once at boot, for the
-# id behind each seeded member name, and to confirm the one id the seed pins.
-# The normal list already carries two rows called browser-automation, which is
-# the live shape: the react bundle pins id 1446, so that name is never looked
-# up and the boot goes through. STUB_MODE=ambiguous adds a second row called
-# senior-frontend, a member the seed still writes by name, and that one has to
-# stop the boot.
-step "build the stub registries"
-STUB_DIR="$TMP_DIR/stub"
-mkdir -p "$STUB_DIR"
-cat >"$STUB_DIR/go.mod" <<'GOMOD'
-module e2e-stub-registries
-
-go 1.22
-GOMOD
-cat >"$STUB_DIR/main.go" <<'GOSRC'
-// Stub skill-store + tool-store for bundle-store's boot seed. Serves the two
-// list routes the seed reads and nothing else.
-package main
-
-import (
-	"fmt"
-	"net/http"
-	"os"
-)
-
-const skills = `[
-  {"id":297,"name":"browser-automation","source_name":"antigravity"},
-  {"id":1446,"name":"browser-automation","source_name":"host"},
-  {"id":1129,"name":"senior-frontend","source_name":"antigravity"},
-  {"id":320,"name":"cc-skill-backend-patterns","source_name":"antigravity"},
-  {"id":1219,"name":"sql-pro","source_name":"antigravity"}
-]`
-
-// A name the seed does not pin, from two sources — one id each, and no way to
-// choose. browser-automation is doubled here too, as in the normal list, so a
-// refusal that names senior-frontend cannot be the pinned member's doing.
-const ambiguousSkills = `[
-  {"id":297,"name":"browser-automation","source_name":"antigravity"},
-  {"id":1446,"name":"browser-automation","source_name":"host"},
-  {"id":1129,"name":"senior-frontend","source_name":"antigravity"},
-  {"id":42,"name":"senior-frontend","source_name":"anthropics"},
-  {"id":320,"name":"cc-skill-backend-patterns","source_name":"antigravity"},
-  {"id":1219,"name":"sql-pro","source_name":"antigravity"}
-]`
-
-const tools = `[
-  {"id":13,"name":"playwright"},
-  {"id":14,"name":"chrome-devtools"}
-]`
-
-func main() {
-	body := skills
-	if os.Getenv("STUB_MODE") == "ambiguous" {
-		body = ambiguousSkills
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/skills", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, body)
-	})
-	mux.HandleFunc("/tools", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, tools)
-	})
-	if err := http.ListenAndServe(os.Getenv("STUB_ADDR"), mux); err != nil {
-		panic(err)
-	}
-}
-GOSRC
-(cd "$STUB_DIR" && CGO_ENABLED=0 go build -o "$BIN_DIR/stub-registries" .)
-
-step "boot the stub registries on :$STUB_PORT"
-STUB_ADDR=":$STUB_PORT" "$BIN_DIR/stub-registries" >>"$TMP_DIR/stub.log" 2>&1 &
-STUB_PID=$!
-OK=""
-for _ in $(seq 1 75); do
-  if ! kill -0 "$STUB_PID" 2>/dev/null; then fail "stub registries exited during startup"; fi
-  if curl -fsS --max-time 2 -o /dev/null "$STUB_BASE/skills" 2>/dev/null; then OK=1; break; fi
-  sleep 0.2
-done
-[ -n "$OK" ] || fail "stub registries did not answer on $STUB_BASE"
-
-# ============================================================================
 step "boot bundle-store on :$PORT against a throwaway data dir"
 BUNDLE_STORE_ADDR=":$PORT" \
 BUNDLE_STORE_DATA_DIR="$DATA_DIR" \
@@ -261,13 +172,14 @@ HOME="$TMP_DIR/fake-home" \
 SERVER_PID=$!
 echo "    pid: $SERVER_PID  data dir: $DATA_DIR"
 
-# Poll — never sleep-and-hope. Abort the instant the pid dies: this catches both
-# a route-registration panic AND a failed boot-time seed (main.go log.Fatalf's if
-# seedBundles fails), which is a real way this binary can die on a good build.
+# Poll — never sleep-and-hope. Abort the instant the pid dies: this catches a
+# route-registration panic, a real way this binary can die on a good build.
+# Nothing answers on SKILL_STORE_URL or TOOL_STORE_URL yet, and the boot must
+# not care.
 OK=""
 for _ in $(seq 1 75); do
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    fail "bundle-store exited during startup (route-registration panic? boot seed failed?)"
+    fail "bundle-store exited during startup (route-registration panic?)"
   fi
   if curl -fsS --max-time 2 -o /dev/null "$BASE/health" 2>/dev/null; then OK=1; break; fi
   sleep 0.2
@@ -278,28 +190,39 @@ step "GET /health"
 CODE=$(req GET /health); expect 200 "$CODE" "/health"
 assert_eq ok "$(jget '.status')" "health status"
 
+# A fresh store is empty, and the smoke builds what it resolves against.
 # ============================================================================
-# The boot seed. A fresh DB is NOT empty — main.go upserts three bundles.
-# ============================================================================
-step "GET /bundles — the boot seed really ran"
+step "GET /bundles — a fresh store holds no bundles"
 CODE=$(req GET /bundles); expect 200 "$CODE" "GET /bundles"
-assert_eq 3 "$(jget 'length')" "seeded bundle count"
-for want in base react go-service; do
-  assert_eq "$want" "$(jget ".[] | select(.name==\"$want\") | .name")" "seeded bundle '$want' exists"
-done
+assert_eq 0 "$(jget 'length')" "bundle count on a fresh store"
 
-step "GET /bundles/by-name/go-service — the seed's members round-tripped through sqlite"
+step "POST /bundles — create base, react and go-service"
+CODE=$(req POST /bundles '{"name":"base","display_name":"Base","enabled":true}')
+expect 201 "$CODE" "POST /bundles base"
+CODE=$(req POST /bundles "{\"name\":\"react\",\"extends\":\"base\",\"match_tags\":[\"react\",\"frontend\"],\"enabled\":true,\"members\":[
+  {\"kind\":\"skill\",\"id\":$SKILL_ID_BROWSER_AUTOMATION,\"name\":\"browser-automation\"},
+  {\"kind\":\"skill\",\"id\":$SKILL_ID_SENIOR_FRONTEND,\"name\":\"senior-frontend\"},
+  {\"kind\":\"tool\",\"id\":$TOOL_ID_PLAYWRIGHT,\"name\":\"playwright\"},
+  {\"kind\":\"tool\",\"id\":$TOOL_ID_CHROME_DEVTOOLS,\"name\":\"chrome-devtools\",\"condition\":\"perf\"}]}")
+expect 201 "$CODE" "POST /bundles react"
+CODE=$(req POST /bundles "{\"name\":\"go-service\",\"extends\":\"base\",\"match_tags\":[\"go\"],\"enabled\":true,\"members\":[
+  {\"kind\":\"skill\",\"id\":$SKILL_ID_BACKEND_PATTERNS,\"name\":\"cc-skill-backend-patterns\"},
+  {\"kind\":\"skill\",\"id\":$SKILL_ID_SQL_PRO,\"name\":\"sql-pro\"}]}")
+expect 201 "$CODE" "POST /bundles go-service"
+CODE=$(req GET /bundles); expect 200 "$CODE" "GET /bundles"
+assert_eq 3 "$(jget 'length')" "bundle count after creating three"
+
+step "GET /bundles/by-name/go-service — the members round-tripped through sqlite"
 CODE=$(req GET /bundles/by-name/go-service); expect 200 "$CODE" "GET /bundles/by-name/{name}"
 assert_eq base "$(jget '.extends')" "go-service extends base"
-present '[.members[].name]' cc-skill-backend-patterns "go-service seed members"
-present '[.members[].name]' sql-pro                   "go-service seed members"
+present '[.members[].name]' cc-skill-backend-patterns "go-service members"
+present '[.members[].name]' sql-pro                   "go-service members"
 present '[.match_tags[]]'     go                        "go-service match_tags"
-# The seed wrote names; what got stored is the id the stub registry handed back.
 assert_eq "$SKILL_ID_BACKEND_PATTERNS" \
   "$(jget '.members[] | select(.name=="cc-skill-backend-patterns") | .id')" \
-  "the boot seed stored skill-store's id, not just the name"
+  "the stored member carries the id that was written"
 assert_eq "$SKILL_ID_SQL_PRO" "$(jget '.members[] | select(.name=="sql-pro") | .id')" \
-  "the boot seed stored skill-store's id, not just the name"
+  "the stored member carries the id that was written"
 
 # ============================================================================
 # POST /resolve — the money route.
@@ -320,7 +243,7 @@ present '[.bundles[].name]' react                "react resolve selects react"
 absent  '[.bundles[].name]' go-service            "react resolve must NOT select go-service"
 present '[.skills[].name]'  browser-automation    "react resolve pulls react's skills"
 present '[.skills[].name]'  senior-frontend       "react resolve pulls react's skills"
-# Per the react seed (cmd/bundle-store/main.go): playwright is UNCONDITIONAL —
+# Per the react bundle created above: playwright is UNCONDITIONAL —
 # every frontend task gets it — while chrome-devtools carries Condition:"perf",
 # i.e. "only when the task is performance". So with no task_tags, playwright is
 # in and chrome-devtools is out. That asymmetry IS the feature; assert both
@@ -338,13 +261,13 @@ echo "    tools: $(jget '[.tools[].name] | join(", ")')"
 step "the resolve response carries the owning store's ids end to end"
 # A consumer installs a skill with skill-store's POST /skills/{id}/install —
 # there is no install-by-name route — so a resolution that hands back names only
-# is not actionable. These are the stub's ids, all the way from the boot seed.
+# is not actionable. These are the ids the smoke wrote, all the way through.
 assert_eq "$TOOL_ID_PLAYWRIGHT" "$(jget '.tools[] | select(.name=="playwright") | .id')" \
   "playwright resolves with tool-store's id"
 assert_eq "$TOOL_ID_CHROME_DEVTOOLS" "$(jget '.tools[] | select(.name=="chrome-devtools") | .id')" \
   "chrome-devtools resolves with tool-store's id"
 assert_eq "$SKILL_ID_BROWSER_AUTOMATION" "$(jget '.skills[] | select(.name=="browser-automation") | .id')" \
-  "browser-automation resolves with the id the seed pins, not its upstream twin's"
+  "browser-automation resolves with the id it was stored under"
 assert_eq "$SKILL_ID_SENIOR_FRONTEND" "$(jget '.skills[] | select(.name=="senior-frontend") | .id')" \
   "senior-frontend resolves with skill-store's id"
 assert_eq 0 "$(jq '[.skills[], .tools[] | select(.id == null or .id <= 0)] | length' "$BODY")" \
@@ -383,7 +306,7 @@ assert_eq 3 "$(jget '.members | length')" "member count"
 assert_eq e2e-cond "$(jget '.members[] | select(.name=="e2e-gated") | .condition')" \
   "the member's condition survived the round trip"
 
-step "POST /resolve — our bundle's gate behaves like the seeded one"
+step "POST /resolve — our bundle's gate behaves like react's"
 CODE=$(req POST /resolve '{"repo_tags":["e2e-smoketag"]}')
 expect 200 "$CODE" "POST /resolve e2e-smoketag"
 present '[.bundles[].name]' "$NAME"     "our bundle was selected by its match_tag"
@@ -492,66 +415,145 @@ step "the server is still alive after all of that"
 CODE=$(req GET /health); expect 200 "$CODE" "/health at end of run"
 
 # ============================================================================
-# The refusal, driven for real. A registry carrying one name twice is the live
-# shape, and for a member the seed writes by name the only safe answer is to
-# stop — picking a row would install whichever upstream repository happened to
-# sync first. The first boot above already passed the other half: the same
-# doubling on browser-automation, which the seed pins by id, did not stop it.
+# The -check-members pre-flight, against the bundles still stored: base, react
+# and go-service (the smoke's own bundles were deleted above).
 # ============================================================================
-step "a seeded member name the registry carries twice stops the boot"
-kill "$STUB_PID" 2>/dev/null || true
-wait "$STUB_PID" 2>/dev/null || true
-STUB_ADDR=":$STUB_PORT" STUB_MODE=ambiguous "$BIN_DIR/stub-registries" >>"$TMP_DIR/stub.log" 2>&1 &
-STUB_PID=$!
-OK=""
-for _ in $(seq 1 75); do
-  if curl -fsS --max-time 2 -o /dev/null "$STUB_BASE/skills" 2>/dev/null; then OK=1; break; fi
-  sleep 0.2
-done
-[ -n "$OK" ] || fail "ambiguous stub registry did not come up"
+# ============================================================================
+# Stub skill-store and tool-store for the -check-members pre-flight, which asks
+# them for every row and checks each stored member id against the answer.
+# STUB_MODE=renamed renames one skill (reported, not a failure);
+# STUB_MODE=missing drops one tool (a failure that names it).
+step "build the stub registries"
+STUB_DIR="$TMP_DIR/stub"
+mkdir -p "$STUB_DIR"
+cat >"$STUB_DIR/go.mod" <<'GOMOD'
+module e2e-stub-registries
 
-# A boot that ought to be refused exits within a second. One that is not
-# refused serves forever, so without a bound this script hangs instead of
-# failing; timeout(1) ends it and reports 124.
-REFUSED_BOOT_LIMIT_SECONDS=20
+go 1.22
+GOMOD
+cat >"$STUB_DIR/main.go" <<'GOSRC'
+// Stub skill-store + tool-store for bundle-store's -check-members pre-flight.
+// Serves the two list routes the check reads and nothing else.
+package main
 
-AMBIG_DIR="$TMP_DIR/ambiguous-data"
-mkdir -p "$AMBIG_DIR"
-set +e
-BUNDLE_STORE_ADDR=":$((PORT + 2))" \
-BUNDLE_STORE_DATA_DIR="$AMBIG_DIR" \
-SKILL_STORE_URL="$STUB_BASE" \
-TOOL_STORE_URL="$STUB_BASE" \
-HOME="$TMP_DIR/fake-home" \
-  timeout "$REFUSED_BOOT_LIMIT_SECONDS" "$BIN_DIR/bundle-store" >"$TMP_DIR/ambiguous.log" 2>&1
-AMBIG_EXIT=$?
-set -e
-[ "$AMBIG_EXIT" -ne 124 ] || fail "bundle-store was still serving after ${REFUSED_BOOT_LIMIT_SECONDS}s despite an ambiguous member name — it picked a row"
-[ "$AMBIG_EXIT" -ne 0 ] || fail "bundle-store started despite an ambiguous member name — it picked a row"
-grep -q 'named "senior-frontend"' "$TMP_DIR/ambiguous.log" \
-  || fail "the refusal must name the ambiguous member: $(cat "$TMP_DIR/ambiguous.log")"
-grep -q 'anthropics' "$TMP_DIR/ambiguous.log" \
-  || fail "the refusal must name the candidate sources: $(cat "$TMP_DIR/ambiguous.log")"
-echo "    refused: $(tail -n 1 "$TMP_DIR/ambiguous.log")"
+import (
+	"fmt"
+	"net/http"
+	"os"
+)
 
-step "an unreachable registry stops the boot too"
+const skills = `[
+  {"id":7001,"name":"browser-automation"},
+  {"id":7002,"name":"senior-frontend"},
+  {"id":7003,"name":"cc-skill-backend-patterns"},
+  {"id":7004,"name":"sql-pro"},
+  {"id":7999,"name":"unrelated-skill"}
+]`
+
+const renamedSkills = `[
+  {"id":7001,"name":"browser-automation"},
+  {"id":7002,"name":"senior-frontend-v2"},
+  {"id":7003,"name":"cc-skill-backend-patterns"},
+  {"id":7004,"name":"sql-pro"}
+]`
+
+const tools = `[
+  {"id":8001,"name":"playwright"},
+  {"id":8002,"name":"chrome-devtools"}
+]`
+
+const missingTools = `[
+  {"id":8001,"name":"playwright"}
+]`
+
+func main() {
+	skillBody, toolBody := skills, tools
+	switch os.Getenv("STUB_MODE") {
+	case "renamed":
+		skillBody = renamedSkills
+	case "missing":
+		toolBody = missingTools
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/skills", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, skillBody)
+	})
+	mux.HandleFunc("/tools", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, toolBody)
+	})
+	if err := http.ListenAndServe(os.Getenv("STUB_ADDR"), mux); err != nil {
+		panic(err)
+	}
+}
+GOSRC
+(cd "$STUB_DIR" && CGO_ENABLED=0 go build -o "$BIN_DIR/stub-registries" .)
+
+# start_stub MODE: (re)start the stub registries in MODE and wait for them.
+start_stub() {
+  if [ -n "$STUB_PID" ] && kill -0 "$STUB_PID" 2>/dev/null; then
+    kill "$STUB_PID" 2>/dev/null || true
+    wait "$STUB_PID" 2>/dev/null || true
+  fi
+  STUB_ADDR="127.0.0.1:$STUB_PORT" STUB_MODE="$1" "$BIN_DIR/stub-registries" >>"$TMP_DIR/stub.log" 2>&1 &
+  STUB_PID=$!
+  local ok=""
+  for _ in $(seq 1 75); do
+    if ! kill -0 "$STUB_PID" 2>/dev/null; then fail "stub registries exited during startup"; fi
+    if curl -fsS --max-time 2 -o /dev/null "$STUB_BASE/skills" 2>/dev/null; then ok=1; break; fi
+    sleep 0.2
+  done
+  [ -n "$ok" ] || fail "stub registries ($1) did not answer on $STUB_BASE"
+}
+
+# run_check LOG: run the pre-flight against the smoke's data dir and stubs;
+# prints its exit status.
+run_check() {
+  set +e
+  BUNDLE_STORE_DATA_DIR="$DATA_DIR" \
+  SKILL_STORE_URL="$STUB_BASE" \
+  TOOL_STORE_URL="$STUB_BASE" \
+  HOME="$TMP_DIR/fake-home" \
+    timeout 30 "$BIN_DIR/bundle-store" -check-members >"$1" 2>&1
+  local status=$?
+  set -e
+  echo "$status"
+}
+
+step "-check-members passes when every stored member id is carried"
+start_stub normal
+CHECK_EXIT=$(run_check "$TMP_DIR/check-normal.log")
+[ "$CHECK_EXIT" = 0 ] || fail "check-members failed with every id present: $(cat "$TMP_DIR/check-normal.log")"
+grep -q 'all 6 member(s) across 3 stored bundle(s)' "$TMP_DIR/check-normal.log" \
+  || fail "check-members must count the stored members: $(cat "$TMP_DIR/check-normal.log")"
+echo "    $(tail -n 1 "$TMP_DIR/check-normal.log")"
+
+step "-check-members reports a member renamed upstream, and still passes"
+start_stub renamed
+CHECK_EXIT=$(run_check "$TMP_DIR/check-renamed.log")
+[ "$CHECK_EXIT" = 0 ] || fail "a renamed member must not fail the check: $(cat "$TMP_DIR/check-renamed.log")"
+grep -q 'RELABELLED.*bundle react.*skill id 7002.*"senior-frontend-v2"' "$TMP_DIR/check-renamed.log" \
+  || fail "the check must report the rename: $(cat "$TMP_DIR/check-renamed.log")"
+
+step "-check-members fails on a member id deleted upstream, and names it"
+start_stub missing
+CHECK_EXIT=$(run_check "$TMP_DIR/check-missing.log")
+[ "$CHECK_EXIT" != 0 ] || fail "a missing member id must fail the check: $(cat "$TMP_DIR/check-missing.log")"
+grep -q 'MISSING: bundle react (id [0-9]*): include tool id 8002, stored as "chrome-devtools"' "$TMP_DIR/check-missing.log" \
+  || fail "the failure must name bundle, kind, id and stored name: $(cat "$TMP_DIR/check-missing.log")"
+echo "    refused: $(tail -n 1 "$TMP_DIR/check-missing.log")"
+
+step "-check-members fails when the registries cannot be reached"
 kill "$STUB_PID" 2>/dev/null || true
 wait "$STUB_PID" 2>/dev/null || true
 STUB_PID=""
-DOWN_DIR="$TMP_DIR/down-data"
-mkdir -p "$DOWN_DIR"
-set +e
-BUNDLE_STORE_ADDR=":$((PORT + 3))" \
-BUNDLE_STORE_DATA_DIR="$DOWN_DIR" \
-SKILL_STORE_URL="$STUB_BASE" \
-TOOL_STORE_URL="$STUB_BASE" \
-HOME="$TMP_DIR/fake-home" \
-  timeout "$REFUSED_BOOT_LIMIT_SECONDS" "$BIN_DIR/bundle-store" >"$TMP_DIR/down.log" 2>&1
-DOWN_EXIT=$?
-set -e
-[ "$DOWN_EXIT" -ne 124 ] || fail "bundle-store was still serving after ${REFUSED_BOOT_LIMIT_SECONDS}s with no registry to read ids from"
-[ "$DOWN_EXIT" -ne 0 ] || fail "bundle-store started with no registry to read ids from"
-echo "    refused: $(tail -n 1 "$TMP_DIR/down.log")"
+CHECK_EXIT=$(run_check "$TMP_DIR/check-down.log")
+[ "$CHECK_EXIT" != 0 ] || fail "check-members passed with no registry to ask: $(cat "$TMP_DIR/check-down.log")"
+echo "    refused: $(tail -n 1 "$TMP_DIR/check-down.log")"
+
+step "the server never needed the registries, and is still alive"
+CODE=$(req GET /health); expect 200 "$CODE" "/health after the checks"
 
 # ============================================================================
 step "hermeticity: the live db was never opened"

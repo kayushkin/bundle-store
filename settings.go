@@ -54,11 +54,11 @@ func SettingDefinitions() []servicesettings.Definition {
 		{Key: SettingListenAddress, EnvironmentVariable: "BUNDLE_STORE_ADDR", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: DefaultListenAddress,
 			Description: "The address the HTTP server listens on. Changing it moves the service, so everything that resolves a session's bundle must be told the new address."},
 		{Key: SettingDataDirectory, EnvironmentVariable: "BUNDLE_STORE_DATA_DIR", Kind: msg.ServiceSettingKindPath, ValueType: msg.ServiceSettingValueTypeString, Default: DefaultDataDir(),
-			Description: "The directory that holds bundle-store.db. Changing it starts the service on whatever database is there, or an empty one that the boot seed refills with the starter bundles; hand-curated bundles stay where they were."},
+			Description: "The directory that holds bundle-store.db. Changing it starts the service on whatever database is there, or on an empty one with no bundles; the bundles in the old directory stay where they were."},
 		{Key: SettingSkillStoreURL, EnvironmentVariable: "SKILL_STORE_URL", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: DefaultSkillStoreURL,
-			Description: "Where skill-store answers. The boot seed reads every skill once to turn its curated member names into skill-store ids; a wrong address stops the service at boot rather than seeding bundles whose members point at nothing."},
+			Description: "Where skill-store answers. Only the -check-members pre-flight reads it, to confirm every stored skill member id still exists; the server itself never calls skill-store."},
 		{Key: SettingToolStoreURL, EnvironmentVariable: "TOOL_STORE_URL", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: DefaultToolStoreURL,
-			Description: "Where tool-store answers. The boot seed reads every tool once to turn its curated member names into tool-store ids; a wrong address stops the service at boot rather than seeding bundles whose members point at nothing."},
+			Description: "Where tool-store answers. Only the -check-members pre-flight reads it, to confirm every stored tool member id still exists; the server itself never calls tool-store."},
 	}
 }
 

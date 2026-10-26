@@ -117,7 +117,7 @@ type BundleRef struct {
 // ExtendsID and never Extends.
 //
 // On a write either one may be supplied. A caller that has the parent's id
-// gives ExtendsID; a caller writing a definition by hand (the boot seed, a curl)
+// gives ExtendsID; a caller writing a definition by hand (a curl, a script)
 // gives Extends, and UpsertBundle turns that name into an id once, against
 // bundle-store's own bundles table, refusing the write if no such parent exists.
 // Supplying both is only accepted when they agree — one fact arriving by two

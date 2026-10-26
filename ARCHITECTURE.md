@@ -97,16 +97,16 @@ emits tags; skill-store needs tag filtering exposed.
   later lint, not a coupling. A member is the id its owning store assigned, with the
   name kept alongside for display — skill-store carries 13 SKILL.md names from two
   sources each, and installs only by `POST /skills/{id}/install`, so a name is neither
-  unique nor actionable. The boot seed is the one place that turns a curated name into
-  an id, and it refuses to start on an ambiguous or missing one.
+  unique nor actionable. Nothing in bundle-store turns a name into an id: a writer gives
+  the id. `bundle-store -check-members` reads the stored bundles and confirms each member
+  id still exists in its owning store; `deploy.sh` runs it before stopping the service.
 
 ## Phasing
 
 1. **Now (this scaffold):** repo-store + bundle-store stand alone and resolve correctly.
 2. **Phase 1:** in-process resolver in llm-bridge-server (repo-store tags → bundle-store
    /resolve → existing provision). Adopt `repodetect` in inber. Expose skill-store tag
-   filtering. (Ingesting `browser-automation` into skill-store happened on 2026-08-04, as
-   id 1446 from source `host`, beside the upstream id 297; the `react` bundle pins 1446.)
+   filtering.
 3. **Phase 2:** task classifier (Haiku) feeding `task_tags`.
 4. **Phase 3:** utility-feedback loop — scheduler job mines log-store for member usage
    per (repo-tag × task-tag), proposes curated bundle edits, human-approved.

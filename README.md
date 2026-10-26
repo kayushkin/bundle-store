@@ -43,19 +43,17 @@ preference:
   something a consumer can act on without guessing.
 
 So `bundle_members.member_id` is the identity and `name` is a display label that
-is never read back to find a row. Nothing in the `bundlestore` package looks a
-member up by name; `cmd/bundle-store/members.go` is the single place that turns
-a curated name into an id, and it **refuses to start** when a name is missing or
-carried more than once, naming every candidate.
+is never read back to find a row. Nothing in bundle-store looks a member up by
+name: a caller writing a bundle gives each member's id, and a member with a name
+and no id is a `400`.
 
-Where a starter member's name is carried more than once, the seed pins the id
-instead and keeps the name beside it; the boot confirms that the owning store
-still carries that id **under that name**, and refuses to start otherwise. The
-`react` bundle does this for `browser-automation`: skill-store carries id 297
-from the antigravity upstream and id 1446 from a locally installed copy in
-`~/.claude/skills`, and the bundle means 1446. `bundle-store -check-members`
-asks every one of these questions without starting the service, and
-`deploy.sh` runs it before it stops the running instance.
+A fresh install holds no bundles; create them through `POST /bundles`. The
+owning stores can delete or rename a row without telling bundle-store, so
+`bundle-store -check-members` reads every stored bundle and asks skill-store and
+tool-store about every member id. An id the owning store no longer carries is a
+failure line naming the bundle, kind, id and stored name. An id it still carries
+under another name is reported but passes, because the id is what the bundle
+means. `deploy.sh` runs the check before it stops the running instance.
 
 ## Data model
 
@@ -97,8 +95,7 @@ into its own form.
 from a name without asking the owning store, and the library never asks — so
 `Open` moves the old rows into `bundle_members_legacy_name_join`, keeps them,
 and reports the count on `Store.QuarantinedMembers`; `cmd/bundle-store` logs it
-at boot. The seeded bundles are rewritten with real ids by the same boot. Any
-hand-curated member has to be re-added through `POST /bundles` with its id.
+at boot. Each such member has to be re-added through `POST /bundles` with its id.
 
 **Inheritance is an id too.** `extends_id` points at the parent row; the wire
 type still carries `extends` as the parent's **name**, read back off the parent
@@ -147,8 +144,9 @@ nothing is denied:
    without repeats.
 6. `model`/`effort`: last non-empty wins across applied bundles.
 
-Pure join — no calls into skill-store/tool-store. Verified composition (seeded
-bundles):
+Pure join — no calls into skill-store/tool-store. Example composition, for a
+`base` bundle, a `go-service` bundle matching `go` and a `react` bundle matching
+`react` whose `chrome-devtools` member carries the condition `perf`:
 
 ```
 repo_tags=[go,react,...]            → bundles[base,go-service,react]
@@ -171,9 +169,6 @@ repo_tags=[go]                      → skills[backend-patterns,sql-pro] tools[]
 | GET | `/member-effects` | the effects a member may carry: `["include","deny"]` |
 | POST | `/resolve` | compose a bundle for `{repo_tags, task_tags}` or `{bundle_ids, task_tags}` |
 
-Seeded starter bundles (`cmd/bundle-store/main.go`, canonical source for them):
-`base`, `react`, `go-service`.
-
 ## Decisions taken (in this scaffold)
 
 - **Bundles carry optional `model`/`effort` but NOT `system_prompt`.** Model/effort are
@@ -183,9 +178,9 @@ Seeded starter bundles (`cmd/bundle-store/main.go`, canonical source for them):
   as the default when agent-store is silent.
 - **`/resolve` is a pure id-join.** Validation that referenced skills/tools still
   exist (against skill-store/tool-store) is deliberately out of scope here — add as a
-  lint endpoint later rather than coupling resolve to those services. The boot seed is
-  the one exception, and only because its members are written by hand as names.
-- **Curation is hand-first.** The seed file is the canonical base; a future
+  lint endpoint later rather than coupling resolve to those services. The
+  `-check-members` pre-flight does that check outside the server, by id.
+- **Curation is hand-first.** Bundles are written through the API; a future
   utility-feedback loop (mining log-store for which members were actually used per
   repo/task) should propose changes that are human-approved, never silently mutate.
 
@@ -219,10 +214,9 @@ curl -s localhost:8307/health
 | `SKILL_STORE_URL` | `http://localhost:8301` | where skill-store answers |
 | `TOOL_STORE_URL` | `http://localhost:8302` | where tool-store answers |
 
-The last two are read once at boot, by the seed, to turn its curated member
-names into ids. Both have to answer or the service refuses to start — a bundle
-whose members point at nothing is worse than no bundle. `bundle-store
--check-members` asks the same question without starting the service.
+The last two are read only by `bundle-store -check-members`, which checks every
+stored member id against them and exits; the server itself never calls either
+store, and boots without them.
 
 The variables are declared once in `settings.go`, and `GET /settings` describes
 each one with the value in force. A new variable is declared there or

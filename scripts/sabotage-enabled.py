@@ -16,15 +16,18 @@ header says what that costs. Diff before editing either.
 Why this seam is worth a scorer: `enabled` is the only per-bundle switch the
 service has, and until the 218th pass **nothing executed the code that writes
 it**. A panic() at the first line of `Store.SetEnabled` or `handler.setEnabled`
-left `go test ./...` green. The flag is written at two layers, read by a third
-(`Resolve`, via `ListFilter.EnabledOnly`) and defended at a fourth
-(`seedBundles`, which must not undo an operator's choice at every boot) — so the
-mechanisms below deliberately cross all four files rather than sitting in one.
+left `go test ./...` green. The flag is written at two layers and read by a
+third (`Resolve`, via `ListFilter.EnabledOnly`), so the mechanisms below
+deliberately cross all three files rather than sitting in one.
 
 THREE targets, and that is deliberate. This flag is not a property of one file:
-the store writes it, the server routes it, and the seed is the only thing
-stopping a restart from reverting it. A scorer covering only store.go would put
-a number on a third of the feature.
+the store writes it, the server routes it, and the resolver reads it. A scorer
+covering only store.go would put a number on a third of the feature.
+
+The service once seeded three bundles at every boot, and this file scored the
+two lines that kept the seed from reverting an operator's flag. The seed is
+gone, and so are those two cases. Run after the seed came out: 16/16 real
+mechanisms caught, both controls behaved, exit 0.
 
 Case-writing rules inherited from the scheduler plans:
 
@@ -73,9 +76,8 @@ TARGETS = [
     REPO / "store.go",
     REPO / "server.go",
     REPO / "resolve.go",
-    REPO / "cmd/bundle-store/main.go",
 ]
-PACKAGES = ["./", "./cmd/bundle-store/"]
+PACKAGES = ["./"]
 
 
 CASES = [
@@ -185,18 +187,6 @@ CASES = [
     Case(
         "parseID accepts 0 and negatives, so /bundles/0/disable is a lookup rather than a 400",
         [("if err != nil || id <= 0 {", "if err != nil {")],
-    ),
-
-    # ---- seedBundles: the promise that makes a disable durable ----
-    Case(
-        "the boot seed stops preserving the operator's flag, re-enabling on every restart",
-        [("\t\tif existing, err := store.GetBundleByName(b.Name); err == nil {\n\t\t\tb.Enabled = existing.Enabled\n\t\t}",
-          "\t\tif _, err := store.GetBundleByName(b.Name); err == nil {\n\t\t}")],
-    ),
-    Case(
-        "the boot seed preserves the flag by skipping the row, freezing curated definitions",
-        [("\t\tif _, err := store.UpsertBundle(&b); err != nil {",
-          "\t\tif existing, err := store.GetBundleByName(b.Name); err == nil {\n\t\t\t_ = existing\n\t\t\tcontinue\n\t\t}\n\t\tif _, err := store.UpsertBundle(&b); err != nil {")],
     ),
 ]
 

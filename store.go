@@ -89,7 +89,7 @@ const LegacyMembersTable = "bundle_members_legacy_name_join"
 
 // quarantineNameJoinedMembers moves a pre-member_id bundle_members table aside
 // so the current schema can create the real one, and reports how many rows went
-// with it. A caller that seeds its members afresh will overwrite them anyway;
+// with it. None of those rows carries an id, so none can be resolved;
 // anything hand-curated is still readable in LegacyMembersTable and has to be
 // re-added with the ids its names never carried.
 func quarantineNameJoinedMembers(db *sql.DB) (int, error) {
@@ -550,7 +550,7 @@ func (s *Store) GetBundle(id int64) (*Bundle, error) {
 }
 
 // GetBundleByName answers the lookup a human asked for by name — the
-// /bundles/by-name/{name} route and the boot seed's "does this already exist".
+// /bundles/by-name/{name} route.
 // It is not a join: nothing inside this package reads a stored name back to
 // find the row it points at.
 func (s *Store) GetBundleByName(name string) (*Bundle, error) {

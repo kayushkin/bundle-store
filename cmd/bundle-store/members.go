@@ -4,94 +4,136 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
-	"sort"
-	"strings"
 	"time"
 
 	bundlestore "github.com/kayushkin/bundle-store"
+	"github.com/kayushkin/llm-bridge/servicesettings"
 )
 
-// This file is the only place on the bundle-store side that turns a curated
-// member *name* into the id its owning store assigned. It exists because the
-// starter bundles below are written by hand, and a human writes "sql-pro", not
-// "1219". Everything downstream of here — the schema, the resolver, the HTTP
-// API — carries the id and treats the name as a label.
+// This file is the -check-members pre-flight. A bundle stores each member as
+// the id skill-store or tool-store assigned, with the name beside it only as a
+// label. Either store can delete or rename that row at any time, and nothing
+// tells bundle-store. The check reads every stored bundle, asks both stores for
+// every row they hold, and reports:
 //
-// It is deliberately strict. A name that matches nothing, or that matches more
-// than one row, stops the seed with an error that names the candidates. Picking
-// one is the failure this whole change removes: skill-store carries the same
-// SKILL.md name from more than one upstream source, so "first row wins" means
-// a bundle silently installs whichever repository was synced first.
+//   - a member id the owning store no longer carries. That member resolves to
+//     nothing in a session, so it fails the check.
+//   - a member id the store still carries under a different name than the
+//     stored label. The id is what the bundle means, so this is reported and
+//     does not fail the check; the label is only out of date.
 
 // storeEntry is the shape both skill-store and tool-store list endpoints share.
-// Source is skill-store's originating repository; tool-store leaves it empty.
 type storeEntry struct {
-	ID     int64  `json:"id"`
-	Name   string `json:"name"`
-	Source string `json:"source_name"`
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
 }
 
-// memberIndex answers "what id does this name have", and refuses to answer when
-// the name has more than one.
+// memberIndex answers "does the owning store still carry this id, and under
+// what name".
 type memberIndex struct {
-	byKind map[bundlestore.MemberKind]map[string][]storeEntry
+	byKind map[bundlestore.MemberKind]map[int64]storeEntry
 }
 
-func (ix *memberIndex) lookup(kind bundlestore.MemberKind, name string) (int64, error) {
-	matches := ix.byKind[kind][name]
-	switch len(matches) {
-	case 1:
-		return matches[0].ID, nil
-	case 0:
-		return 0, fmt.Errorf("%s has no %s named %q", kind.OwningStore(), kind, name)
-	default:
-		return 0, fmt.Errorf(
-			"%s has %d %ss named %q (%s) — a bundle member must name the id, not the name",
-			kind.OwningStore(), len(matches), kind, name, describeEntries(matches))
+func newMemberIndex(skills, tools []storeEntry) *memberIndex {
+	return &memberIndex{byKind: map[bundlestore.MemberKind]map[int64]storeEntry{
+		bundlestore.MemberSkill: indexByID(skills),
+		bundlestore.MemberTool:  indexByID(tools),
+	}}
+}
+
+func indexByID(entries []storeEntry) map[int64]storeEntry {
+	out := make(map[int64]storeEntry, len(entries))
+	for _, e := range entries {
+		out[e.ID] = e
 	}
+	return out
 }
 
-// confirm answers "does the store still carry this id, under this name". A
-// starter member pins an id when its name is ambiguous, and the name written
-// beside that id records which row the curator chose: a typo in the id, or a
-// row the store has since renamed, would otherwise seed a different member
-// without a word. Both are refused, naming what the store holds instead.
-func (ix *memberIndex) confirm(kind bundlestore.MemberKind, id int64, name string) error {
-	for _, entries := range ix.byKind[kind] {
-		for _, e := range entries {
-			if e.ID != id {
+// memberCheckReport is the outcome of checking stored bundles against the two
+// owning stores. Missing lines fail the check; relabelled lines do not.
+type memberCheckReport struct {
+	Missing    []string
+	Relabelled []string
+}
+
+// checkStoredMembers checks every member of every given bundle, whatever its
+// effect or the bundle's enabled flag: a denied tool whose id the store no
+// longer carries denies nothing, and a disabled bundle can be enabled again
+// tomorrow. It reports every problem rather than stopping at the first, so one
+// deploy shows the whole list.
+func checkStoredMembers(index *memberIndex, bundles []bundlestore.Bundle) memberCheckReport {
+	var report memberCheckReport
+	for _, b := range bundles {
+		for _, m := range b.Members {
+			effect := m.Effect
+			if effect == "" {
+				effect = bundlestore.MemberInclude
+			}
+			entry, carried := index.byKind[m.Kind][m.ID]
+			if !carried {
+				report.Missing = append(report.Missing, fmt.Sprintf(
+					"bundle %s (id %d): %s %s id %d, stored as %q: %s has no %s with that id",
+					b.Name, b.ID, effect, m.Kind, m.ID, m.Name, m.Kind.OwningStore(), m.Kind))
 				continue
 			}
-			if e.Name != name {
-				return fmt.Errorf("%s %s id %d is named %q, not %q — the pinned id no longer names the %s the seed chose",
-					kind.OwningStore(), kind, id, e.Name, name, kind)
+			if entry.Name != m.Name {
+				report.Relabelled = append(report.Relabelled, fmt.Sprintf(
+					"bundle %s (id %d): %s %s id %d is stored as %q, but %s now names it %q",
+					b.Name, b.ID, effect, m.Kind, m.ID, m.Name, m.Kind.OwningStore(), entry.Name))
 			}
-			return nil
 		}
 	}
-	return fmt.Errorf("%s has no %s with id %d (seeded as %q)", kind.OwningStore(), kind, id, name)
+	return report
 }
 
-func describeEntries(entries []storeEntry) string {
-	parts := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.Source != "" {
-			parts = append(parts, fmt.Sprintf("id=%d from %s", e.ID, e.Source))
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("id=%d", e.ID))
+// runMemberCheck opens the store in the data directory the server would use,
+// checks every stored bundle against skill-store and tool-store, logs one line
+// per problem, and returns an error when any member id is missing upstream.
+func runMemberCheck(settings *servicesettings.Registry) error {
+	store, err := bundlestore.Open(settings.String(bundlestore.SettingDataDirectory))
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
 	}
-	sort.Strings(parts)
-	return strings.Join(parts, ", ")
+	defer store.Close()
+
+	bundles, err := store.ListBundles(bundlestore.ListFilter{})
+	if err != nil {
+		return fmt.Errorf("list bundles: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), upstreamListTimeout)
+	defer cancel()
+	index, err := loadMemberIndex(ctx,
+		settings.String(bundlestore.SettingSkillStoreURL),
+		settings.String(bundlestore.SettingToolStoreURL))
+	if err != nil {
+		return fmt.Errorf("read member ids: %w", err)
+	}
+
+	report := checkStoredMembers(index, bundles)
+	for _, line := range report.Relabelled {
+		log.Printf("RELABELLED (not a failure): %s", line)
+	}
+	for _, line := range report.Missing {
+		log.Printf("MISSING: %s", line)
+	}
+	memberCount := 0
+	for _, b := range bundles {
+		memberCount += len(b.Members)
+	}
+	if len(report.Missing) > 0 {
+		return fmt.Errorf("%d of %d member(s) across %d stored bundle(s) name an id their owning store no longer carries",
+			len(report.Missing), memberCount, len(bundles))
+	}
+	log.Printf("check-members: all %d member(s) across %d stored bundle(s) are carried by their owning store (%d label(s) out of date)",
+		memberCount, len(bundles), len(report.Relabelled))
+	return nil
 }
 
-// loadMemberIndex reads every skill and every tool once. Both stores run beside
-// this one on the same box; if either cannot be reached the seed fails rather
-// than installing a bundle whose members point at nothing.
-//
-// It reads no environment: the two base URLs are the skill_store_url and
-// tool_store_url settings, which main takes from the registry and hands in.
+// loadMemberIndex reads every skill and every tool once. If either store cannot
+// be reached the check fails rather than reporting members it could not check.
 func loadMemberIndex(ctx context.Context, skillStoreBaseURL, toolStoreBaseURL string) (*memberIndex, error) {
 	skills, err := fetchEntries(ctx, skillStoreBaseURL+"/skills")
 	if err != nil {
@@ -101,18 +143,7 @@ func loadMemberIndex(ctx context.Context, skillStoreBaseURL, toolStoreBaseURL st
 	if err != nil {
 		return nil, fmt.Errorf("tool-store: %w", err)
 	}
-	return &memberIndex{byKind: map[bundlestore.MemberKind]map[string][]storeEntry{
-		bundlestore.MemberSkill: groupByName(skills),
-		bundlestore.MemberTool:  groupByName(tools),
-	}}, nil
-}
-
-func groupByName(entries []storeEntry) map[string][]storeEntry {
-	out := map[string][]storeEntry{}
-	for _, e := range entries {
-		out[e.Name] = append(out[e.Name], e)
-	}
-	return out
+	return newMemberIndex(skills, tools), nil
 }
 
 func fetchEntries(ctx context.Context, url string) ([]storeEntry, error) {
@@ -135,5 +166,5 @@ func fetchEntries(ctx context.Context, url string) ([]storeEntry, error) {
 	return entries, nil
 }
 
-// memberLookupTimeout bounds the two list calls the seed makes at boot.
-const memberLookupTimeout = 15 * time.Second
+// upstreamListTimeout bounds the two list calls the check makes.
+const upstreamListTimeout = 15 * time.Second

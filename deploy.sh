@@ -46,16 +46,17 @@ if [ "$vcs_modified" = "true" ]; then
     echo "    source is not recoverable from any commit. Commit first for a reproducible build." >&2
 fi
 
-# Every starter bundle names its members by name and the owning store decides
-# whether a name still resolves to exactly one row. When one becomes ambiguous
-# upstream the seed calls log.Fatalf and the service does not come up — and the
-# stop below has already taken the old one down, so the box is left with no
-# bundle-store at all. Ask before stopping anything.
-echo "==> Pre-flight: do the starter bundle members still resolve?"
+# Every stored bundle names its members by the id skill-store or tool-store
+# assigned, and either store can delete a row without telling bundle-store. A
+# member whose id is gone resolves to nothing in a session. Ask before stopping
+# anything, so a deploy shows the list while the running instance is untouched.
+# A member whose id is still there under a new name is reported, not refused.
+echo "==> Pre-flight: does every stored bundle member id still exist upstream?"
 if ! ./"$BINARY" -check-members; then
   echo "ERROR: aborting the deploy BEFORE stopping the running service."
-  echo "       The running instance is untouched. Fix the member names in"
-  echo "       starterBundles() (cmd/bundle-store/main.go) and re-run."
+  echo "       The running instance is untouched. Each MISSING line above names a"
+  echo "       bundle member whose id its owning store no longer carries: replace or"
+  echo "       remove it through POST /bundles, then re-run."
   exit 1
 fi
 
